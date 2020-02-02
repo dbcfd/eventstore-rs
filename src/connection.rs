@@ -131,6 +131,7 @@ async fn connection_state_machine(
 
     // Live state
     while let Some(msg) = recv.next().await {
+        trace!("Received message {:?}", msg);
         match msg {
             Msg::Start => driver.start().await,
             Msg::Establish(endpoint) => driver.on_establish(endpoint),
@@ -157,6 +158,8 @@ async fn connection_state_machine(
             }
         }
     }
+
+    debug!("Closing connection");
 
     // Closing state
     while let Some(msg) = recv.next().await {

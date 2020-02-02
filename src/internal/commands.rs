@@ -1198,12 +1198,12 @@ impl SubscribeToStream {
 
     /// Sends the volatile subscription request to the server asynchronously
     /// even if the subscription is available right away.
-    pub fn execute(self) -> types::Subscription {
+    pub async fn execute(self) -> types::Subscription {
         let mut op = operations::SubscribeToStream::new();
 
         op.set_event_stream_id(self.stream_id);
         op.set_resolve_link_tos(self.resolve_link_tos);
-        op.execute(self.creds, self.sender)
+        op.execute(self.creds, self.sender).await
     }
 }
 

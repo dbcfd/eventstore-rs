@@ -1083,7 +1083,7 @@ impl SubscribeToStream {
         self.inner.set_resolve_link_tos(value);
     }
 
-    pub fn execute(
+    pub async fn execute(
         mut self,
         creds_opt: Option<Credentials>,
         mut bus: mpsc::Sender<Msg>,

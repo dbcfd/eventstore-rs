@@ -245,6 +245,11 @@ impl Driver {
             if let Some(conn) = self.candidate.as_mut() {
                 conn.enqueue(pkg).await;
             }
+        } else {
+            debug!(
+                "Can't establish, state is {:?} with phase {:?}",
+                self.state, self.phase
+            );
         }
     }
 
@@ -279,8 +284,14 @@ impl Driver {
                 self.tracker.reset();
 
                 match self.default_user.clone() {
-                    Some(creds) => self.authenticate(creds).await,
-                    None => self.identify_client().await,
+                    Some(creds) => {
+                        debug!("Authenticating with creds");
+                        self.authenticate(creds).await
+                    }
+                    None => {
+                        debug!("No default user, identifying client");
+                        self.identify_client().await
+                    }
                 }
             }
         }
