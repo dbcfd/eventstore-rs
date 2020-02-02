@@ -8,7 +8,9 @@ use futures::channel::oneshot;
 use futures::pin_mut;
 use std::collections::HashMap;
 use std::error::Error;
+use std::future::Future;
 use std::net::ToSocketAddrs;
+use std::pin::Pin;
 use std::time::Duration;
 use tokio_test::block_on;
 use uuid::Uuid;
@@ -20,20 +22,26 @@ struct TestSub {
 }
 
 impl eventstore::SubscriptionConsumer for TestSub {
-    fn when_confirmed(&mut self, id: Uuid, last_commit_position: i64, last_event_number: i64) {
+    fn when_confirmed<'a>(
+        &'a mut self,
+        id: Uuid,
+        last_commit_position: i64,
+        last_event_number: i64,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         debug!(
             "Subscription confirmed: {}, last_commit_position: {}, last_event_number: {}",
             id, last_commit_position, last_event_number
         );
+        Box::pin(futures::future::ready(()))
     }
 
-    fn when_event_appeared<E>(
-        &mut self,
-        _: &mut E,
+    fn when_event_appeared<'a, E>(
+        &'a mut self,
+        _: &'a mut E,
         event: Box<eventstore::ResolvedEvent>,
-    ) -> eventstore::OnEventAppeared
+    ) -> Pin<Box<dyn Future<Output = eventstore::OnEventAppeared> + Send + 'a>>
     where
-        E: eventstore::SubscriptionEnv,
+        E: eventstore::SubscriptionEnv + Send,
     {
         let event = event.get_original_event();
         let num = &event.event_number;
@@ -43,15 +51,18 @@ impl eventstore::SubscriptionConsumer for TestSub {
 
         self.count += 1;
 
-        if self.count == self.max {
+        let r = if self.count == self.max {
             eventstore::OnEventAppeared::Drop
         } else {
             eventstore::OnEventAppeared::Continue
-        }
+        };
+
+        Box::pin(futures::future::ready(r))
     }
 
-    fn when_dropped(&mut self) {
+    fn when_dropped<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         debug!("Subscription dropped!");
+        Box::pin(futures::future::ready(()))
     }
 }
 
@@ -61,40 +72,50 @@ struct PersistentTestSub {
 }
 
 impl eventstore::SubscriptionConsumer for PersistentTestSub {
-    fn when_confirmed(&mut self, id: Uuid, last_commit_position: i64, last_event_number: i64) {
+    fn when_confirmed<'a>(
+        &'a mut self,
+        id: Uuid,
+        last_commit_position: i64,
+        last_event_number: i64,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         debug!(
             "Subscription confirmed: {}, last_commit_position: {}, last_event_number: {}",
             id, last_commit_position, last_event_number
         );
+        Box::pin(futures::future::ready(()))
     }
 
-    fn when_event_appeared<E>(
-        &mut self,
-        env: &mut E,
+    fn when_event_appeared<'a, E>(
+        &'a mut self,
+        env: &'a mut E,
         event: Box<eventstore::ResolvedEvent>,
-    ) -> eventstore::OnEventAppeared
+    ) -> Pin<Box<dyn Future<Output = eventstore::OnEventAppeared> + Send + 'a>>
     where
-        E: eventstore::SubscriptionEnv,
+        E: eventstore::SubscriptionEnv + Send,
     {
-        let event = event.get_original_event();
-        let num = &event.event_number;
-        let stream_id = &event.event_stream_id;
+        let f = async move {
+            let event = event.get_original_event();
+            let num = &event.event_number;
+            let stream_id = &event.event_stream_id;
 
-        debug!("Event appeared, stream_id {}, num {}", stream_id, num);
+            debug!("Event appeared, stream_id {}, num {}", stream_id, num);
 
-        self.count += 1;
+            self.count += 1;
 
-        env.push_ack(event.event_id);
+            env.push_ack(event.event_id);
 
-        if self.count == self.max {
-            eventstore::OnEventAppeared::Drop
-        } else {
-            eventstore::OnEventAppeared::Continue
-        }
+            if self.count == self.max {
+                eventstore::OnEventAppeared::Drop
+            } else {
+                eventstore::OnEventAppeared::Continue
+            }
+        };
+        Box::pin(f)
     }
 
-    fn when_dropped(&mut self) {
+    fn when_dropped<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         debug!("Subscription dropped!");
+        Box::pin(futures::future::ready(()))
     }
 }
 
@@ -414,7 +435,10 @@ async fn test_volatile_subscription(
     connection: &eventstore::Connection,
 ) -> Result<(), Box<dyn Error>> {
     let stream_id = fresh_stream_id("volatile");
-    let sub = connection.subcribe_to_stream(stream_id.as_str()).execute();
+    let sub = connection
+        .subcribe_to_stream(stream_id.as_str())
+        .execute()
+        .await;
     let events = generate_events("volatile-test", 3);
     // let confirmation = sub.confirmation();
 

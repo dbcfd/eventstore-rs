@@ -138,7 +138,9 @@ impl Connection {
     }
 
     pub async fn enqueue(&mut self, pkg: Pkg) {
-        let _ = self.sender.send(pkg).await;
+        if let Err(_) = self.sender.send(pkg).await {
+            error!("Failed to enqueue package");
+        }
     }
 
     pub async fn enqueue_all(&mut self, pkgs: Vec<Pkg>) {

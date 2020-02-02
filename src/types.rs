@@ -14,6 +14,8 @@ use protobuf::Chars;
 use serde::de::Deserialize;
 use serde::ser::Serialize;
 use serde_json;
+use std::future::Future;
+use std::pin::Pin;
 use uuid::{BytesError, Uuid};
 
 use crate::internal::command::Cmd;
@@ -997,7 +999,7 @@ pub trait SubscriptionEnv {
     ///
     /// * Notes
     /// For persistent subscription only.
-    fn current_event_retry_count(&self) -> usize;
+    fn current_event_retry_count(&mut self) -> usize;
 
     /// Like `push_nak_with_message` but uses an empty message for `NakAction`.
     fn push_nak(&mut self, ids: Vec<Uuid>, action: NakAction) {
@@ -1010,7 +1012,7 @@ struct NoopSubscriptionEnv;
 impl SubscriptionEnv for NoopSubscriptionEnv {
     fn push_ack(&mut self, _: Uuid) {}
     fn push_nak_with_message<S: AsRef<str>>(&mut self, _: Vec<Uuid>, _: NakAction, _: S) {}
-    fn current_event_retry_count(&self) -> usize {
+    fn current_event_retry_count(&mut self) -> usize {
         0
     }
 }
@@ -1051,7 +1053,7 @@ impl SubscriptionEnv for PersistentSubscriptionEnv {
         self.naks.push(naked);
     }
 
-    fn current_event_retry_count(&self) -> usize {
+    fn current_event_retry_count(&mut self) -> usize {
         self.retry_count
     }
 }
@@ -1065,16 +1067,29 @@ pub trait SubscriptionConsumer {
     /// It's possible to have `when_event_appeared` called before
     /// `when_confirmed` for catchup subscriptions as catchup subscriptions
     /// mixes several operations at the same time.
-    fn when_confirmed(&mut self, _id: Uuid, _last_commit_position: i64, _last_event_number: i64) {}
+    fn when_confirmed<'a>(
+        &'a mut self,
+        _id: Uuid,
+        _last_commit_position: i64,
+        _last_event_number: i64,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(futures::future::ready(()))
+    }
 
     /// Called when the subscription has received an event from the server.
-    fn when_event_appeared<E>(&mut self, _: &mut E, _: Box<ResolvedEvent>) -> OnEventAppeared
+    fn when_event_appeared<'a, E>(
+        &'a mut self,
+        _: &'a mut E,
+        _: Box<ResolvedEvent>,
+    ) -> Pin<Box<dyn Future<Output = OnEventAppeared> + Send + 'a>>
     where
-        E: SubscriptionEnv;
+        E: SubscriptionEnv + Send;
 
     /// Called when the subscrition has been dropped whether by the server or
     /// the user themself.
-    fn when_dropped(&mut self) {}
+    fn when_dropped<'a>(self: &'a mut Self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(futures::future::ready(()))
+    }
 }
 
 pub(crate) enum SubEvent {
@@ -1179,9 +1194,9 @@ where
             let decision = match state.persistent_id.as_ref() {
                 Some(sub_id) => {
                     let mut env = PersistentSubscriptionEnv::new(retry_count);
-                    let decision = state.consumer.when_event_appeared(&mut env, event);
+                    let decision = state.consumer.when_event_appeared(&mut env, event).await;
 
-                    let acks = env.acks;
+                    let acks = std::mem::replace(&mut env.acks, vec![]);
 
                     if !acks.is_empty() {
                         let mut msg = messages::PersistentSubscriptionAckEvents::new();
@@ -1204,7 +1219,7 @@ where
                         let _ = sender.send(Msg::Send(pkg)).await;
                     }
 
-                    let naks = env.naks;
+                    let naks = std::mem::replace(&mut env.naks, vec![]);
                     let mut pkgs = Vec::new();
 
                     if !naks.is_empty() {
@@ -1241,9 +1256,10 @@ where
                     decision
                 }
 
-                None => state
-                    .consumer
-                    .when_event_appeared(&mut NoopSubscriptionEnv, event),
+                None => {
+                    let mut env = NoopSubscriptionEnv;
+                    state.consumer.when_event_appeared(&mut env, event).await
+                }
             };
 
             if let OnEventAppeared::Drop = decision {
@@ -1273,7 +1289,7 @@ pub struct Subscription {
 }
 
 impl Subscription {
-    /// Consumes asynchronously the events comming from a subscription.
+    /// Consumes asynchronously the events coming from a subscription.
     pub async fn consume_async<C>(mut self, init: C) -> C
     where
         C: SubscriptionConsumer,
@@ -1281,9 +1297,12 @@ impl Subscription {
         let mut sender = self.sender.clone();
         let mut state = State::new(init);
 
-        while let Some(event) = self.receiver.next().await {
-            if let OnEvent::Stop = on_event(&mut sender, &mut state, event).await {
-                break;
+        loop {
+            trace!("Asking for next event");
+            if let Some(event) = self.receiver.next().await {
+                if let OnEvent::Stop = on_event(&mut sender, &mut state, event).await {
+                    break;
+                }
             }
         }
 
